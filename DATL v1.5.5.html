@@ -1,0 +1,1042 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8">
+		<title>DATL: Defense Against The Lines</title>
+		
+		<style type="text/css">
+			#stage {
+				width: 512px;
+				height: 462px;
+				position: relative;
+				border: 2px solid orange;
+				float: left;
+			}
+			
+			#side-menu {
+				height: 450px;
+				width: 160px;
+				float: left;
+				margin-left: 30px;
+				border: 1px solid grey;
+			}
+				
+			canvas { position: absolute; }
+			#ui { z-index: 3; }
+			#game { z-index: 2; }
+			#background { z-index: 1; }
+		
+			canvas { 
+				/*The following enables a crisper image across multiple browsers. 
+				Remove if the image is a appearing too sharp.*/
+				image-rendering: optimizeSpeed;
+				image-rendering: -moz-crisp-edges;
+				image-rendering: -webkit-optimize-contrast;
+				image-rendering: optimize-contrast;
+				image-rendering: pixelated;
+				-ms-interpolation-mode: nearest-neighbor;
+			}
+			
+			#sprites {
+				display: none;
+			}
+			
+			.sprite {
+				position: relative;
+			}
+			
+			.low {
+				color: red;
+				font-weight: bold;
+			}
+			
+			h3 {
+				margin-bottom: 2px; 
+			}
+		</style>
+		
+		<script type="text/javascript">
+			var expandingExplosions = [], shrinkingExplosions = [], expandingFakeExplosions = [], shrinkingFakeExplosions = [];
+			var DEBUG = false, frameStepCount = 0, frameStepMax = 0, frame = 0;
+			var keyBind = {alpha: 65, delta: 87, omega: 68, pause: 32};
+			var keyIsUp = {alpha: true, delta: true, omega: true, pause: true};
+			var canvasUi, canvasGm, canvasBg, ctxUi, ctxGm, ctxBg, isRunning = true, noFlash = false, isLocked = false;
+			var canvasX, canvasY, pauseButton, stageNumElement, requestId;
+			var colors = ["#F00", "#0F0", "#00F", "#FF0", "#0FF", "#F0F", "#FFF", "#000"]; // Should always be length 8
+			var pallets = [["#00F", "#F00", "#0FF", "#FF0", "#000"], ["#00F", "#0F0", "#0FF", "#FF0", "#000"], ["#0F0", "#F00", "#FF0", "#00F", "#000"], 
+							["#00F", "#FF0", "#FF0", "#F00", "#000"], ["#000", "#F00", "#F0F", "#FF0", "#00F"], ["#00F", "#F00", "#000", "#FF0", "#0FF"],
+							["#FF0", "#000", "#000", "#0F0", "#F0F"], ["#F00", "#000", "#FFF", "#0F0", "#FF0"], ["#0F0", "#F0F", "#FF0", "#F00", "#FFF"], 
+							["#00F", "#000", "#0F0", "#FF0", "#F00"]];
+			var pallet = pallets[0];
+			// pallet[5] and pallet[6] are rainbow, pallet[5] is faster flickering. They are added later in tick.
+			var stage = 0, liveCityCount = 6, stageEnemyCount = 0;
+			var nextWave = {frame: 0, enemyCount: 0, waveAfter: 0, extra: false};
+			var cities = [new City(87.5, 423.5), new City(141.5, 425.5), new City(189.5, 427.5), 
+							new City(295.5, 423.5), new City(359.5, 417.5), new City(415.5, 425.5)];
+			var siloCoords = [[ 42, 414 ], [ 249, 413 ], [ 482, 414 ]]; // because silos can't be destroyed, their a bit more hard-coded
+			var siloAmmoCounts = [10, 10, 10], siloAmmoElements = [];
+			var stageTargets = [];
+			var canvasS1, canvasS2, canvasP1, canvasB1, canvasB2, canvasC1, canvasC2, canvasG1, ctxS1, ctxS2, ctxP1, ctxB1, ctxB2, ctxC1, ctxC2, ctxG1;
+			var bgSprites = [];
+			var enemies = [];
+			var myCrosshair = {
+				x: 100,
+				y: 100,
+				size: 14,
+				thickness: 2,
+				color: pallet[0],
+				render: true,
+				draw: function(x = this.x, y = this.y) {
+					this.x = x;
+					this.y = y;
+					
+					if (this.render) {
+						ctxUi.fillStyle = this.color;
+
+						// Vertical line
+						ctxUi.fillRect(this.x - this.thickness / 2, this.y - this.size / 2, this.thickness, this.size);
+						// Horizontal line
+						ctxUi.fillRect(this.x - this.size / 2, this.y - this.thickness / 2, this.size, this.thickness);
+					}
+				},
+				clear: function() {
+					if (this.render) {
+						ctxUi.clearRect(this.x - this.size / 2, this.y - this.size / 2, this.size, this.size);
+					}
+				}
+			};		
+			
+			function getLevel() {
+				if (stage < 1) {
+					console.warn("Stage less than 1! stage = " + stage);
+					return 0;
+				}
+				return Math.floor(stage / 2) + stage % 2;
+			}
+			
+			function printMessage(msg = "UNSET", x = canvasUi.width / 2, y = canvasUi.height / 2){
+				ctxUi.font = "900 28px Prestige, mononspace";
+				ctxUi.textAlign = "center";
+				ctxUi.fillStyle = pallet[0];
+				
+				//A quick and dirty way to make text look blocky
+				ctxUi.fillText(msg, x, y);
+				ctxUi.fillText(msg, x, y);
+				ctxUi.fillText(msg, x, y);
+				ctxUi.fillText(msg, x, y);
+				ctxUi.fillText(msg, x, y);
+				ctxUi.fillText(msg, x, y);
+			}
+			
+			function City(x, y, isAlive = true) {
+				this.x = x;
+				this.y = y;
+				this.isAlive = isAlive;
+			}
+			
+			function genStageTargets() {
+				stageTargets = [];
+				if (liveCityCount > 3) {
+					while (stageTargets.length < 3) {
+						var num = Math.floor(Math.random() * 6);
+						if (stageTargets.findIndex(function (element) {
+							return element[0] == cities[num].x && element[1] == cities[num].y;
+						}) == -1 && cities[num].isAlive) {
+							stageTargets.push([cities[num].x, cities[num].y]);
+						}
+					}
+				} else {
+					//There are only so many cities
+					cities.forEach(function (element){
+						if (element.isAlive) {
+							stageTargets.push([element.x, element.y]);
+						}
+					});
+					while (stageTargets.length < 3) {
+						var num = Math.floor(Math.random() * 6);
+						if (stageTargets.findIndex(function (element) {
+								return element[0] == cities[num].x && element[1] == cities[num].y
+							;}) == -1) {
+							stageTargets.push([cities[num].x, cities[num].y]);
+						}
+					}
+				}
+				stageTargets = stageTargets.concat(siloCoords);
+			}
+			
+			function initSprites(color1 = pallet[0], color2 = pallet[1], color3 = pallet[2], color4 = pallet[3], color5 = pallet[4]) {
+				canvasS1 = document.getElementById("satellite1");
+				canvasS2 = document.getElementById("satellite2");
+				canvasP1 = document.getElementById("plane");
+				canvasB1 = document.getElementById("smartbomb1");
+				canvasB2 = document.getElementById("smartbomb2");
+				canvasC1 = document.getElementById("city1");
+				canvasC2 = document.getElementById("city2");
+				canvasG1 = document.getElementById("ground1");
+				
+				//Additional check for browser support of canvas
+				if(canvasS1.getContext){
+					ctxS1 = canvasS1.getContext("2d", {alpha: false});
+					ctxS2 = canvasS2.getContext("2d");
+					ctxP1 = canvasP1.getContext("2d", {alpha: false});
+					ctxB1 = canvasB1.getContext("2d", {alpha: false});
+					ctxB2 = canvasB2.getContext("2d");
+					ctxC1 = canvasC1.getContext("2d");
+					ctxC2 = canvasC2.getContext("2d");
+					ctxG1 = canvasG1.getContext("2d", {alpha: false});
+					
+					drawSpriteCanvases(color1, color2, color3, color4, color5);
+						
+				} else {
+					//canvas-unsupported code here
+				}
+			}
+			
+			function drawSpriteCanvases(color1 = pallet[0], color2 = pallet[1], color3 = pallet[2], color4 = pallet[3], color5 = pallet[4]) {
+					// Plane
+					ctxP1.fillStyle = color5; // Background Color (color 5)
+					ctxP1.fillRect(0, 0, canvasP1.width, canvasP1.height);
+					
+					ctxP1.fillStyle = color2; // Plane color (color 2)
+					ctxP1.fillRect(8, 0, 4, 2);
+					ctxP1.fillRect(2, 2, 2, 2);
+					ctxP1.fillRect(10, 2, 4, 16);
+					ctxP1.fillRect(2, 4, 4, 4);
+					ctxP1.fillRect(14, 4, 2, 12);
+					ctxP1.fillRect(6, 6, 18, 2);
+					ctxP1.fillRect(0, 8, 28, 2);
+					ctxP1.fillRect(6, 10, 26, 2);
+					ctxP1.fillRect(8, 12, 4, 8);
+					ctxP1.fillRect(16, 12, 2, 2);
+					ctxP1.fillRect(4, 16, 6, 6);
+					
+					// Change this to avoid this color change
+					ctxP1.fillStyle = color5; // Background Color (color 5)
+					ctxP1.fillRect(4, 16, 2, 4); 
+					
+					
+					// Satellite 1 (Going right; No Alpha)
+					ctxS1.fillStyle = color5; // Background Color (color 5)
+					ctxS1.fillRect(0, 0, canvasS1.width, canvasS1.height);
+					
+					ctxS1.fillStyle = "#FFF"; // Satellite light color (Rainbow)
+					ctxS1.fillRect(0, 0, 2, 2);
+					ctxS1.fillRect(24, 0, 2, 2);
+					ctxS1.fillRect(0, 24, 2, 2);
+					ctxS1.fillRect(24, 24, 2, 2);
+					
+					ctxS1.fillStyle = color2; // Satellite body color
+					ctxS1.fillRect(2, 2, 2, 2);
+					ctxS1.fillRect(22, 2, 2, 2);
+					ctxS1.fillRect(4, 4, 2, 2);
+					ctxS1.fillRect(10, 4, 6, 18);
+					ctxS1.fillRect(20, 4, 2, 2);
+					ctxS1.fillRect(6, 6, 14, 14);
+					ctxS1.fillRect(4, 10, 18, 6);
+					ctxS1.fillRect(4, 20, 2, 2);
+					ctxS1.fillRect(20, 20, 2, 2);
+					ctxS1.fillRect(2, 22, 2, 2);
+					ctxS1.fillRect(22, 22, 2, 2);
+					
+					ctxS1.fillStyle = color1; // Satellite "eye" color (color 1?)
+					ctxS1.fillRect(6, 10, 4, 6);
+					ctxS1.fillRect(14, 10, 4, 6);
+					
+					
+					//Satellite 2 (Going right; Alpha layer)
+					ctxS2.fillStyle = color5; // Background color
+					ctxS2.fillRect(0, 0, canvasS2.width, canvasS2.height);
+					
+					// Satellite light color (Clear, for Rainbow layed in canvas)
+					ctxS2.clearRect(0, 0, 2, 2);
+					ctxS2.clearRect(24, 0, 2, 2);
+					ctxS2.clearRect(0, 24, 2, 2);
+					ctxS2.clearRect(24, 24, 2, 2);
+					
+					ctxS2.fillStyle = color2; // Satellite body color (color 2)
+					ctxS2.fillRect(2, 2, 2, 2);
+					ctxS2.fillRect(22, 2, 2, 2);
+					ctxS2.fillRect(4, 4, 2, 2);
+					ctxS2.fillRect(10, 4, 6, 18);
+					ctxS2.fillRect(20, 4, 2, 2);
+					ctxS2.fillRect(6, 6, 14, 14);
+					ctxS2.fillRect(4, 10, 18, 6);
+					ctxS2.fillRect(4, 20, 2, 2);
+					ctxS2.fillRect(20, 20, 2, 2);
+					ctxS2.fillRect(2, 22, 2, 2);
+					ctxS2.fillRect(22, 22, 2, 2);
+					
+					ctxS2.fillStyle = color1; // Satellite "eye" color (color 1?)
+					ctxS2.fillRect(6, 10, 4, 6);
+					ctxS2.fillRect(14, 10, 4, 6);
+					
+					
+					// Smart Bomb 1 (No alpha layer)
+					ctxB1.fillStyle = color5; // Background Color (color 5)
+					ctxB1.fillRect(0, 0, canvasB1.width, canvasB1.height);
+					
+					ctxB1.fillStyle = color2; // Smart Bomb outer-layer color (color 2)
+					ctxB1.fillRect(4, 0, 2, 10);
+					ctxB1.fillRect(2, 2, 6, 6);
+					ctxB1.fillRect(0, 4, 10, 2);
+					
+					ctxB1.fillStyle = "#FFF"; // Smart Bomb inner-layer color (Rainbow)
+					ctxB1.fillRect(4, 2, 2, 6);
+					ctxB1.fillRect(2, 4, 6, 2);
+					
+					ctxB1.fillStyle = color5; // Smart Bomb core color (Background => color 5)
+					ctxB1.fillRect(4, 4, 2, 2);
+					
+					// Smart Bomb 2 (Alpha layer)
+					
+					ctxB2.fillStyle = color2; // Smart Bomb outer-layer color (color 2)
+					ctxB2.fillRect(4, 0, 2, 10);
+					ctxB2.fillRect(2, 2, 6, 6);
+					ctxB2.fillRect(0, 4, 10, 2);
+					
+					// Smart Bomb inner-layer color (Clear, for Rainbow layed in canvas)
+					ctxB2.clearRect(4, 2, 2, 6);
+					ctxB2.clearRect(2, 4, 6, 2);
+					
+					ctxB2.fillStyle = color5; // Smart Bomb core color (Background => color 5)
+					ctxB2.fillRect(4, 4, 2, 2);
+					
+					
+					// City 1 (Alpha layer)				
+					ctxC1.fillStyle = color1; // Background City color (color 1)
+					ctxC1.fillRect(22, 0, 2, 6);
+					ctxC1.fillRect(4, 2, 2, 2);
+					ctxC1.fillRect(4, 4, 4, 4);
+					ctxC1.fillRect(18, 4, 2, 2);
+					ctxC1.fillRect(10, 6, 2, 2);
+					ctxC1.fillRect(18, 6, 8, 2);
+					ctxC1.fillRect(28, 6, 2, 2);
+					ctxC1.fillRect(2, 8, 12, 4);
+					ctxC1.fillRect(20, 8, 10, 4);
+					ctxC1.fillRect(0, 12, 32, 2);
+					ctxC1.fillRect(12, 14, 8, 2);
+					
+					ctxC1.fillStyle = color3; // Foreground City color (color 3)
+					ctxC1.fillRect(16, 6, 2, 6);
+					ctxC1.fillRect(18, 8, 2, 6);
+					ctxC1.fillRect(4, 10, 2, 2);
+					ctxC1.fillRect(10, 10, 2, 4);
+					ctxC1.fillRect(14, 10, 6, 2);
+					ctxC1.fillRect(24, 10, 2, 2);
+					ctxC1.fillRect(4, 12, 4, 2);
+					ctxC1.fillRect(12, 12, 4, 2);
+					ctxC1.fillRect(20, 12, 2, 2);
+					ctxC1.fillRect(24, 12, 4, 2);
+					ctxC1.fillRect(2, 14, 10, 2);
+					ctxC1.fillRect(20, 14, 10, 2);
+					
+					// City 2 (Dead with Alpha layer)				
+					ctxC2.fillStyle = color4; // Dead City color (Ground color => color 4)
+					ctxC2.fillRect(22, 0, 2, 6);
+					ctxC2.fillRect(4, 2, 2, 2);
+					ctxC2.fillRect(4, 4, 4, 4);
+					ctxC2.fillRect(18, 4, 2, 2);
+					ctxC2.fillRect(10, 6, 2, 2);
+					ctxC2.fillRect(18, 6, 8, 2);
+					ctxC2.fillRect(28, 6, 2, 2);
+					ctxC2.fillRect(2, 8, 12, 4);
+					ctxC2.fillRect(20, 8, 10, 4);
+					ctxC2.fillRect(0, 12, 32, 2);
+					ctxC2.fillRect(12, 14, 8, 2);
+					ctxC2.fillRect(16, 6, 2, 6);
+					ctxC2.fillRect(18, 8, 2, 6);
+					ctxC2.fillRect(4, 10, 2, 2);
+					ctxC2.fillRect(10, 10, 2, 4);
+					ctxC2.fillRect(14, 10, 6, 2);
+					ctxC2.fillRect(24, 10, 2, 2);
+					ctxC2.fillRect(4, 12, 4, 2);
+					ctxC2.fillRect(12, 12, 4, 2);
+					ctxC2.fillRect(20, 12, 2, 2);
+					ctxC2.fillRect(24, 12, 4, 2);
+					ctxC2.fillRect(2, 14, 10, 2);
+					ctxC2.fillRect(20, 14, 10, 2);
+					
+					// Gound 1 (No Alpha)
+					ctxG1.fillStyle = color5; // Ground Background color (Background => color 5)
+					ctxG1.fillRect(0, 0, canvasG1.width, canvasG1.height);
+					
+					ctxG1.fillStyle = color4; // Ground color (color 4)
+					ctxG1.fillRect(24, 0, 4, 2);
+					ctxG1.fillRect(58, 0, 4, 2);
+					ctxG1.fillRect(234, 0, 4, 4);
+					ctxG1.fillRect(258, 0, 4, 2);
+					ctxG1.fillRect(466, 0, 4, 2);
+					ctxG1.fillRect(500, 0, 4, 2);
+					ctxG1.fillRect(22, 2, 8, 2);
+					ctxG1.fillRect(56, 2, 8, 2);
+					ctxG1.fillRect(238, 2, 2, 2);
+					ctxG1.fillRect(256, 2, 8, 2);
+					ctxG1.fillRect(462, 2, 8, 2);
+					ctxG1.fillRect(498, 2, 8, 2);
+					ctxG1.fillRect(20, 4, 46, 2);
+					ctxG1.fillRect(232, 4, 34, 6);
+					ctxG1.fillRect(460, 4, 48, 4);
+					ctxG1.fillRect(18, 6, 50, 2);
+					ctxG1.fillRect(230, 6, 2, 4);
+					ctxG1.fillRect(508, 6, 2, 2);
+					ctxG1.fillRect(16, 8, 54, 2);
+					ctxG1.fillRect(266, 8, 2, 2);
+					ctxG1.fillRect(458, 8, 52, 2);
+					ctxG1.fillRect(12, 10, 60, 2);
+					ctxG1.fillRect(228, 10, 40, 2);
+					ctxG1.fillRect(456, 10, 54, 2);
+					ctxG1.fillRect(10, 12, 62, 2);
+					ctxG1.fillRect(226, 12, 44, 2);
+					ctxG1.fillRect(344, 12, 32, 2);
+					ctxG1.fillRect(454, 12, 56, 2);
+					ctxG1.fillRect(454, 12, 56, 2);
+					ctxG1.fillRect(8, 14, 66, 2);
+					ctxG1.fillRect(112, 14, 4, 2);
+					ctxG1.fillRect(224, 14, 48, 4);
+					ctxG1.fillRect(342, 14, 36, 2);
+					ctxG1.fillRect(452, 14, 58, 2);
+					ctxG1.fillRect(6, 16, 70, 2);
+					ctxG1.fillRect(110, 16, 8, 2);
+					ctxG1.fillRect(222, 16, 2, 2);
+					ctxG1.fillRect(340, 16, 40, 2);
+					ctxG1.fillRect(450, 16, 62, 2);
+					ctxG1.fillRect(2, 18, 76, 2);
+					ctxG1.fillRect(100, 18, 20, 2);
+					ctxG1.fillRect(214, 18, 92, 2);
+					ctxG1.fillRect(336, 18, 44, 2);
+					ctxG1.fillRect(446, 18, 66, 2);
+					ctxG1.fillRect(0, 20, 122, 2);
+					ctxG1.fillRect(146, 20, 32, 2);
+					ctxG1.fillRect(206, 20, 180, 2);
+					ctxG1.fillRect(444, 20, 68, 2);
+					
+					ctxG1.fillRect(0, 22, 182, 4);
+					ctxG1.fillRect(202, 22, 310, 2);
+					
+					ctxG1.fillRect(182, 24, 4, 2);
+					ctxG1.fillRect(200, 24, 312, 2);
+					ctxG1.fillRect(0, 26, 512, 26);
+				}
+			
+			function gameReset() {
+				expandingExplosions = [], expandingFakeExplosions = [], shrinkingExplosions = [], shrinkingFakeExplosions = [];
+				enemies = [];
+				ctxGm.clearRect(0, 0, canvasGm.width, canvasGm.height);
+				ctxUi.clearRect(0, 0, canvasUi.width, canvasUi.height);
+				cities.forEach(function (element) {
+					element.isAlive = true;
+				});
+				liveCityCount = cities.length;
+				
+				bgSprites.push({id: "ground1", x: 0, y: 410});
+				cities.forEach(function (element) {
+					bgSprites.push({id: "city1",  x: element.x - 15.5, y: element.y - 7.5});
+				});
+				updateBg();
+				myCrosshair.draw(canvasUi.width / 2, canvasUi.height / 2);
+				stage = 0;
+			}
+			
+			function init() {
+				canvasUi = document.getElementById("ui");
+				canvasGm = document.getElementById("game");
+				canvasBg = document.getElementById("background");
+				//Additional check for browser support of canvas
+				if(canvasUi.getContext){
+					ctxUi = canvasUi.getContext("2d");
+					ctxGm = canvasGm.getContext("2d");
+					ctxBg = canvasBg.getContext("2d", {alpha: false});
+					stageNumElement = document.getElementById("stageNum");
+					siloAmmoElements.push(document.getElementById("ammo1"));
+					siloAmmoElements.push(document.getElementById("ammo2"));
+					siloAmmoElements.push(document.getElementById("ammo3"));
+					
+					canvasX = canvasUi.getBoundingClientRect().left;
+					canvasY = canvasUi.getBoundingClientRect().top;
+					
+					initSprites();
+					
+					gameReset();
+					
+					canvasUi.addEventListener("mousemove", function (e) {
+						//var clX = getCanvasMouseX(e), clY = getCanvasMouseY(e);
+						myCrosshair.clear();
+						myCrosshair.draw(getCanvasMouseX(e), getCanvasMouseY(e)); // I come back later... I come back
+					});
+					
+					window.addEventListener("keydown", function (e) {
+						if (e.keyCode == keyBind.pause && keyIsUp.pause) {
+							if (isRunning) {
+								pause();
+							} else {
+								play();
+							}
+							keyIsUp.pause = false;
+						} else if (isRunning) {
+							if (e.keyCode == keyBind.alpha && keyIsUp.alpha) {
+								if (siloAmmoCounts[0] > 0) {
+									console.log("Fire Aphla (left)");
+									expandingExplosions.push(new Explosion(myCrosshair.x, myCrosshair.y));
+									siloAmmoCounts[0]--;
+									siloAmmoElements[0].innerHTML = siloAmmoCounts[0];
+									if (siloAmmoCounts[0] < 4) {
+										siloAmmoElements[0].classList.add("low");
+									}
+								}
+								keyIsUp.alpha = false;
+							} else if (e.keyCode == keyBind.delta && keyIsUp.delta) {
+								if (siloAmmoCounts[1] > 0) {
+									console.log("Fire Delta (center)");
+									expandingExplosions.push(new Explosion(myCrosshair.x, myCrosshair.y));
+									siloAmmoCounts[1]--;
+									siloAmmoElements[1].innerHTML = siloAmmoCounts[1];
+									if (siloAmmoCounts[1] < 4) {
+										siloAmmoElements[1].classList.add("low");
+									}
+								}
+								keyIsUp.delta = false;
+							} else if (e.keyCode == keyBind.omega && keyIsUp.omega) {
+								if (siloAmmoCounts[2] > 0) {
+									console.log("Fire Omega (right)");
+									expandingExplosions.push(new Explosion(myCrosshair.x, myCrosshair.y));
+									siloAmmoCounts[2]--;
+									siloAmmoElements[2].innerHTML = siloAmmoCounts[2];
+									if (siloAmmoCounts[2] < 4) {
+										siloAmmoElements[2].classList.add("low");
+									}
+								}
+								keyIsUp.omega = false;
+							}
+						}
+					});
+					
+					window.addEventListener("keyup", function (e) {
+						for (var key of Object.getOwnPropertyNames(keyIsUp)) {
+							if(e.keyCode == keyBind[key]){
+								keyIsUp[key] = true;
+							}
+						}
+					});
+					
+					
+					//Set-up HTML controls
+					pauseButton = document.getElementById("pause-play");
+					pauseButton.addEventListener("click", function () {
+						//Pressing space to pause while the button was in focus was causing
+						//stange behavior
+						this.blur();
+						if (isRunning) {
+							pause();
+						} else {
+							play();
+						}
+					});
+					
+					document.getElementById("flash").addEventListener("change", function () {
+						this.blur();
+						noFlash = this.checked;
+					});
+					//The checkbox takes on the state it had before if the page is reloaded.
+					//make sure it is synced with noFlash
+					noFlash = document.getElementById("flash").checked;
+					
+					document.getElementById("new-game").addEventListener("click", function () {
+						this.blur();
+						lock();
+						gameReset();
+						startStage();
+						unlock();
+						requestId = requestAnimationFrame(tick);
+					});
+					
+					
+					startStage();
+					requestId = requestAnimationFrame(tick);
+				} else {
+					//canvas-unsupported code here
+				}
+			}
+			
+			function startStage(){
+				if (liveCityCount > 0) {
+					frame = 0;
+					stage++;
+					stageNum.innerHTML = stage;
+					bgSprites = [];
+					bgSprites.push({id: "ground1", x: 0, y: 410});
+					cities.forEach(function (element) {
+						if (element.isAlive) {
+							bgSprites.push({id: "city1",  x: element.x - 15.5, y: element.y - 7.5});
+						}
+					});
+					setPalletAndUpdateColors(getLevel() - 1);
+					siloAmmoCounts = siloAmmoCounts.map(function (element, index) {
+						siloAmmoElements[index].innerHTML = 10;
+						siloAmmoElements[index].classList.remove("low");
+						return 10;
+					});
+					myCrosshair.render = false;
+					ctxUi.clearRect(0, 0, canvasUi.width, canvasUi.height);
+					printMessage("D E F E N D", canvasUi.width * 1 / 4, canvasUi.height * 3 / 4);
+					printMessage("C I T I E S", canvasUi.width * 3 / 4, canvasUi.height * 3 / 4);
+					
+					genStageTargets();
+					stageEnemyCount = Math.min(30, 6 + stage * 2);
+					setNextWaveSpecial();
+				} else {
+					printMessage("G A M E", canvasUi.width * 1 / 4, canvasUi.height * 3 / 4);
+					printMessage("O V E R", canvasUi.width * 3 / 4, canvasUi.height * 3 / 4);
+					
+					lock();
+					expandingExplosions = [], expandingFakeExplosions = [], shrinkingExplosions = [], shrinkingFakeExplosions = [];
+					ctxGm.clearRect(0, 0, canvasGm.width, canvasGm.height);
+				}
+			}
+			
+			function setNextWaveSpecial() {
+				setNextWave(frame + 200);
+				nextWave.extra = function () {
+					ctxUi.clearRect(0, 0, canvasUi.width, canvasUi.height);
+					myCrosshair.render = true;
+					myCrosshair.draw();
+				};
+			}
+			
+			function setNextWave(frameMod = 0) {
+				if (frameMod) {
+					nextWave.frame = frameMod;
+				} else {
+					nextWave.frame = nextWave.waveAfter;
+				}
+				var temp = 0;
+				temp = 3 + Math.floor(Math.random() * stage / 2);
+				if (temp > stageEnemyCount) {
+					temp = stageEnemyCount;
+				}
+				stageEnemyCount = stageEnemyCount - temp;
+				nextWave.enemyCount = temp;
+				
+				if (stageEnemyCount > 0){
+					temp = Math.floor((Math.random() * (30 - ((stage < 30) ? stage : 30)))) * 2;
+					if (temp < 0) {console.error("Generated bad wave delay."); temp = 0;}
+					nextWave.waveAfter = nextWave.frame + 150 + temp;
+				
+				} else {
+					nextWave.waveAfter = -1;
+				}
+				nextWave.extra = false;
+			}
+			
+			function setPalletAndUpdateColors(palletNum) {
+				pallet = pallets[palletNum % pallets.length];
+				drawSpriteCanvases();
+				myCrosshair.color = pallet[0];
+				updateBg();
+			}
+			
+			function getCanvasMouseX(e) {
+				return e.clientX - canvasX;
+			}
+			
+			function getCanvasMouseY(e) {
+				return e.clientY - canvasY;
+			}
+			
+			function Line(targetX, targetY, startX = Math.random() * (canvasGm.width - 13), startY = 20, ctx = ctxGm){
+				// Uses color 1 for trail, and fast rainbow for head
+				this.targetX = targetX;
+				this.targetY = targetY;
+				this.startX = startX;
+				this.startY = startY;
+				this.slope = (targetY - startY)/(targetX - startX);
+				this.yIntercept = -this.slope * this.targetX + this.targetY;
+				this.x = startX;
+				this.y = startY;
+				this.speed = Math.min(2, 0.5 + stage * 0.1);//2 is the max speed for a continuous trail right now
+				this.ctx = ctx;
+			}
+			
+			Line.prototype.move = function () {
+				this.y = this.y + this.speed;
+				this.x = (this.y - this.yIntercept) / this.slope;
+			}
+			
+			Line.prototype.clear = function () {
+				this.x = this.startX;
+				this.y = this.startY;
+				
+				var roundX = Math.round(this.x), roundY = Math.round(this.y);
+				
+				this.ctx.moveTo(roundX - 1, roundY - 1);
+				this.ctx.lineTo(roundX + 1, roundY - 1);
+				this.ctx.lineTo(roundX + 1, roundY + 1);
+				this.ctx.lineTo(roundX - 1, roundY + 1);
+				this.ctx.lineTo(roundX - 1, roundY - 1);
+				
+				if(this.speed > 0){
+					while (this.y < this.targetY) {
+						this.move();
+						roundX = Math.round(this.x);
+						roundY = Math.round(this.y);
+						
+						this.ctx.moveTo(roundX - 1, roundY - 1);
+						this.ctx.lineTo(roundX + 1, roundY - 1);
+						this.ctx.lineTo(roundX + 1, roundY + 1);
+						this.ctx.lineTo(roundX - 1, roundY + 1);
+						this.ctx.lineTo(roundX - 1, roundY - 1);
+					}
+				} else {
+					console.warn("Incoming missile with improper speed!(" + this.speed + ")");
+				}
+			}
+			
+			Line.prototype.draw = function () {
+				this.ctx.fillRect(Math.round(this.x - 1), Math.round(this.y - 1), 2, 2);
+			}
+			
+			function Explosion(x, y, radius = 5) {
+				this.x = x;
+				this.y = y;
+				this.radius = radius; // Radius should always be an integer
+			}
+			
+			Explosion.prototype.draw = function () {
+				var roundX = Math.round(this.x), roundY = Math.round(this.y);
+				
+				if (this.radius < 6) {
+					// 1 square case
+					ctxGm.fillRect(roundX - this.radius, roundY - this.radius, this.radius * 2, this.radius * 2);
+				} else {
+					// At least 2 rect cases
+					ctxGm.fillRect(roundX - this.radius, roundY - 5, this.radius * 2, 10);
+					ctxGm.fillRect(roundX - 5, roundY - this.radius, 10, this.radius * 2);
+					if (this.radius > 7) {
+						if (this.radius < 14) {
+							// 2 rect and 1 square cases
+							ctxGm.fillRect(roundX - this.radius + 2, roundY - this.radius + 2, this.radius * 2 - 4, this.radius * 2 - 4);
+						} else {
+							// At least 4 rect cases
+							ctxGm.fillRect(roundX - this.radius + 2, roundY - 11, this.radius * 2 - 4, 22);
+							ctxGm.fillRect(roundX - 11, roundY - this.radius + 2, 22, this.radius * 2 - 4);
+							if (this.radius > 16) {
+								if (this.radius < 20) {
+								// 4 rect and 1 square cases
+								ctxGm.fillRect(roundX - this.radius + 4, roundY - this.radius + 4, this.radius * 2 - 8, this.radius * 2 - 8);
+								} else {
+									//At least 6 rect cases
+									ctxGm.fillRect(roundX - this.radius + 4, roundY - 15, this.radius * 2 - 8, 30);
+									ctxGm.fillRect(roundX - 15, roundY - this.radius + 4, 30, this.radius * 2 - 8);
+									if (this.radius > 22) {
+										//6 rect case and 1 square
+										ctxGm.fillRect(roundX - this.radius + 6, roundY - this.radius + 6, this.radius * 2 - 12, this.radius * 2 - 12);
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+			
+			function tick() {
+				if (DEBUG) {
+					isRunning = frameStepCount < frameStepMax;
+				}
+				if (isRunning && !isLocked) {
+					frameStepCount++;
+					var hitCities = []; // only cities that are hit this frame
+					
+					//Enemy and Wave management
+					if (nextWave.frame == frame){
+						if (nextWave.extra) {
+							nextWave.extra();
+						}
+						
+						for (var i = 0; i < nextWave.enemyCount; ++i) {
+							addIncoming();
+						}
+						
+						if (nextWave.waveAfter > -1) {
+							setNextWave();
+						}
+					}
+					
+					if (nextWave.waveAfter < 0 && enemies.length == 0) {
+						startStage();
+					}
+					
+					if (!noFlash) {
+						pallet[5] = colors[frame % 8];
+						pallet[6] = colors[Math.floor(frame / 4) % 8];
+					} else {
+						pallet[5] = pallet[1];
+						pallet[6] = pallet[1];
+					}
+					
+					
+					// color 2 (RED in first pallet) "Clearing" stage
+					ctxGm.fillStyle = pallet[1];
+					for (var enemy of enemies) {
+						enemy.draw();
+					}
+				
+					// Moving (and clear "clearing") stage (for things that need it)
+					// Look into using 2DPaths that are made as the line moves
+					var oldComposite = ctxGm.globalCompositeOperation;
+					ctxGm.globalCompositeOperation = "destination-out"; // For clearing
+					ctxGm.beginPath();
+					for (var i = 0; i < enemies.length; ++i) {
+						enemies[i].move();
+						if (enemies[i].y >= enemies[i].targetY) {
+							expandingFakeExplosions.push(new Explosion(enemies[i].targetX, enemies[i].targetY));
+							let cityIndex = cities.findIndex( function (element) {
+								return element.x == enemies[i].targetX;
+							});
+							
+							
+							if (cityIndex > -1) {
+								if (cities[cityIndex].isAlive) {
+									cities[cityIndex].isAlive = false;
+									liveCityCount--;
+									hitCities.push(cityIndex);
+									bgSprites.push({id: "city2", x: cities[cityIndex].x - 15.5, y: cities[cityIndex].y - 7.5});
+									updateBg();
+								}
+							} else {
+								let siloIndex = siloCoords.findIndex(function (element) {
+									return element[0] == enemies[i].targetX;
+								});
+								siloAmmoCounts[siloIndex] = 0;
+								siloAmmoElements[siloIndex].innerHTML = 0;
+								siloAmmoElements[siloIndex].classList.add("low");
+							}
+							enemies[i].clear();
+							enemies.splice(i, 1);
+							--i;
+						}
+					}
+					// Explosions
+					if (frame % 2 == 0) {
+						//Real Explosions
+						for (var i = 0; i < shrinkingExplosions.length; ++i) {
+							shrinkingExplosions[i].draw(); //The "clearing" part
+							shrinkingExplosions[i].radius -= 1; //The "moving" part
+							if (shrinkingExplosions[i].radius < 1) {
+								shrinkingExplosions.splice(i, 1);
+								--i
+							} else {
+								for (var j = 0; j < enemies.length; ++j) {
+									if (isCollision(enemies[j].x, enemies[j].y, shrinkingExplosions[i].x, shrinkingExplosions[i].y, shrinkingExplosions[i].radius)) {
+										expandingExplosions.push(new Explosion(enemies[j].x, enemies[j].y));
+										enemies[j].clear();
+										enemies.splice(j, 1);
+										--j;
+									}
+								}
+							}
+						}					
+						for (var i = 0; i < expandingExplosions.length; ++i) {
+							expandingExplosions[i].radius += 1;
+							for (var j = 0; j < enemies.length; ++j) {
+								if (isCollision(enemies[j].x, enemies[j].y, expandingExplosions[i].x, expandingExplosions[i].y, expandingExplosions[i].radius)) {
+									expandingExplosions.push(new Explosion(enemies[j].x, enemies[j].y));
+									enemies[j].clear();
+									enemies.splice(j, 1);
+									--j;
+								}
+							}
+							if (expandingExplosions[i].radius >= 27) {
+								shrinkingExplosions.push(expandingExplosions.splice(i, 1)[0]);
+								--i;
+							}
+						}
+						
+						//Fake Explosions
+						for (var i = 0; i < shrinkingFakeExplosions.length; ++i) {
+							shrinkingFakeExplosions[i].draw(); //The clearing part
+							shrinkingFakeExplosions[i].radius -= 1; //The "moving" part
+							if (shrinkingFakeExplosions[i].radius < 1) {
+								shrinkingFakeExplosions.splice(i, 1);
+								--i
+							}
+						}
+						for (var i = 0; i < expandingFakeExplosions.length; ++i) {
+							expandingFakeExplosions[i].radius += 1;
+							if (expandingFakeExplosions[i].radius >= 27) {
+								shrinkingFakeExplosions.push(expandingFakeExplosions.splice(i, 1)[0]);
+								--i;
+							}
+						}
+
+						
+						
+					} else {
+						// Not changing explosion size, but still have to check for collisions
+						for (var i = 0; i < shrinkingExplosions.length; ++i) {
+							for (var j = 0; j < enemies.length; ++j) {
+								if (isCollision(enemies[j].x, enemies[j].y, shrinkingExplosions[i].x, shrinkingExplosions[i].y, shrinkingExplosions[i].radius)) {
+									expandingExplosions.push(new Explosion(enemies[j].x, enemies[j].y));
+									enemies[j].clear();
+									enemies.splice(j, 1);
+									--j;
+								}
+							}
+						}
+						for (var i = 0; i < expandingExplosions.length; ++i) {
+							for (var j = 0; j < enemies.length; ++j) {
+								if (isCollision(enemies[j].x, enemies[j].y, expandingExplosions[i].x, expandingExplosions[i].y, expandingExplosions[i].radius)) {
+									expandingExplosions.push(new Explosion(enemies[j].x, enemies[j].y));
+									enemies[j].clear();
+									enemies.splice(j, 1);
+									--j;
+								}
+							}
+						}
+					}
+					// Other things that would need the clearing offered in this section
+					// Plane
+					// Satellites
+					// smart bombs
+					// Note: Smart bomb, satellite, plane don't need to be cleared when hit, the explosions they make on death should clean them up.
+					ctxGm.fill();
+					ctxGm.globalCompositeOperation = oldComposite;
+					
+					// Drawing Stage
+					// Draw regular city sprites on the game canvas to mask the transition to
+					// a hit city sprite
+					for (var i = 0; i < hitCities.length; ++i) {
+						ctxGm.drawImage(canvasC1, cities[hitCities[i]].x - 15.5, cities[hitCities[i]].y - 7.5);
+					}
+					
+					gameDraw();
+					
+					frame++;
+					requestId = requestAnimationFrame(tick);
+				}
+			}
+			
+			function gameDraw() {				
+				// rainbow color 1 (faster) drawing stage
+				ctxGm.fillStyle = pallet[5];
+				for (var enemy of enemies) {
+					enemy.draw();
+				}
+				
+				// rainbow color 2 (slower) drawing stage
+				ctxGm.fillStyle = pallet[6];
+				for (var explosion of expandingExplosions) {
+						explosion.draw();
+				}
+				for (var explosion of expandingFakeExplosions) {
+						explosion.draw();
+				}
+				for (var explosion of shrinkingExplosions) {
+					explosion.draw();
+				}
+				for (var explosion of shrinkingFakeExplosions) {
+					explosion.draw();
+				}
+			}
+			
+			function updateBg() {
+				//Reset the background color
+				ctxBg.fillStyle = pallet[4];
+				ctxBg.fillRect(0, 0, canvasBg.width, canvasBg.height);
+			
+				// Draw background sprites
+				for (var sprite of bgSprites) {
+					ctxBg.drawImage(document.getElementById(sprite.id), sprite.x, sprite.y);
+				}
+				
+				//TESTING Targets
+				/*ctxBg.fillStyle = "red";
+				ctxBg.beginPath();
+				for (var target of siloCoords) {
+					ctxBg.moveTo(target[0], target[1]);
+					ctxBg.arc(target[0], target[1], 5, 0, Math.PI * 2);
+				}
+				ctxBg.fill();*/
+			}
+			
+			function isCollision(targetX, targetY, explX, explY, explRadius) {
+				// Calculate distance
+				var ptDistance = Math.sqrt((targetX - explX) * (targetX - explX) + (targetY - explY) * (targetY - explY));
+				if (ptDistance > explRadius) {
+					return false;
+				}
+				return true;
+			}
+			
+			function addIncoming(target = Math.floor(Math.random() * stageTargets.length)) {
+				enemies.push(new Line(stageTargets[target][0], stageTargets[target][1]));
+			}
+			
+			function pause() {
+				isRunning = false;
+				pauseButton.value = "Play";
+			}
+			
+			function lock() {
+				isLocked = true;
+				cancelAnimationFrame(requestId);
+			}
+			
+			function unlock() {
+				isLocked = false;
+			}
+			
+			function play() {
+				isRunning = true;
+				if (!isLocked){
+					requestId = requestAnimationFrame(tick);
+				}
+				pauseButton.value = "Pause";				
+			}
+			
+			// DEBUG function
+			function frameStep(num = 1) {
+				DEBUG = true;
+				frameStepCount = 0;
+				frameStepMax = num;
+				isRunning = true;
+				requestId = requestAnimationFrame(tick);
+			}
+		</script>
+	</head>
+	<body onload="init();">
+		<div id="stage">
+			<canvas id="ui" width="512" height="462"></canvas>
+			<canvas id="game" width="512" height="462">
+				<p>
+				There is supposed to be a canvas element here. However, your browser doesn't support use of the canvas tag.
+				The content in this canvas is dynamic and cannot be easily replaced.
+				</p>
+			</canvas>
+			<canvas id="background" width="512" height="462"></canvas>
+		</div>
+		<div id="side-menu">
+			<h3>Stage: <span id="stageNum">ERROR</span></h3>
+			<h3>Silo Ammo:</h3>
+			<div id="game-info">
+				<div class="missiles">Alpha:<span id="ammo1">ERROR</span></div>
+				<div class="missiles">Delta:<span id="ammo2">ERROR</span></div>
+				<div class="missiles">Omega:<span id="ammo3">ERROR</span></div>
+			</div>
+			<h3>Options:</h3>
+			<div id="options">
+				<input id="pause-play" type="button" value="Pause"><br>
+				<label>No Flashing Colors: <input id="flash" type="checkbox"></label><br>
+				<input id="new-game" type="button" value="New Game"><br>
+			</div>
+		</div>
+		<div id="sprites">
+			<canvas class="sprite" id="satellite1" width="26" height="26"></canvas>
+			<canvas class="sprite" id="satellite2" width="26" height="26"></canvas>
+			<canvas class="sprite" id="plane" width="32" height="22"></canvas>
+			<canvas class="sprite" id="smartbomb1" width="10" height="10"></canvas>
+			<canvas class="sprite" id="smartbomb2" width="10" height="10"></canvas><br>
+			<canvas class="sprite" id="city1" width="32" height="16"></canvas>
+			<canvas class="sprite" id="city2" width="32" height="16"></canvas>
+			<canvas class="sprite" id="ground1" width="512" height="52"></canvas>
+		</div>
+	</body>
+</html>
