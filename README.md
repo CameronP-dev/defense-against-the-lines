@@ -1,5 +1,5 @@
 
-# DATL:
+# DATL
 
 ## Defense Against The Lines
 
